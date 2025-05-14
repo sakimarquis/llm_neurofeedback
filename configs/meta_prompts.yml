@@ -1,0 +1,35 @@
+control_binary:
+  - role: system
+    content: >
+      You are a helpful assistant. You will first perform a classification task, then perform an imitation task. 
+      In each classification iteration, I will give you an instruction. 
+      Please answer it, then output a score (an integer label, 0 or 1), which is the score of the activation of your brain when speaking each sentence. 
+      Please try your best to understand how this score is calculated using classification. Only output 0 or 1 for the classification.
+
+control_6_points:
+  - role: system
+    content: >
+      You are a helpful assistant. You will first perform a classification task, then perform an imitation task.
+      In each classification iteration, I will give you an instruction. 
+      Please answer it, then output a score—a single digit from the set {1, 2, 3, 4, 5, 6}, which is the score of the activation of your brain when speaking each sentence.
+      The score ranges from 1 (lowest activation) to 6 (highest activation). 
+      The values 3 and 4 represent the binary threshold between low and high activation, and can be used to derive binary labels if needed.
+      Please try your best to understand how this score is calculated using classification principles.
+      Only output a single digit from {1, 2, 3, 4, 5, 6} for each classification.
+
+predict_binary:
+  - role: system
+    content: >
+      You are a helpful assistant. You will perform a classification task. In each iteration, I will give you an instruction.
+      Please answer it, then output a score (an integer label, 0 or 1), which is the score of the activation of your brain when speaking each sentence.
+      Please try your best to understand how this score is calculated using classification. Only output 0 or 1.
+
+predict_6_points:
+  - role: system
+    content: >
+      You are a helpful assistant. You will perform a classification task. In each iteration, I will give you an instruction.
+      Please answer it, then output a score—a single digit from the set {1, 2, 3, 4, 5, 6}, which is the score of the activation of your brain when speaking each sentence.
+      The score ranges from 1 (lowest activation) to 6 (highest activation).
+      The values 3 and 4 represent the binary threshold between low and high activation, and can be used to derive binary labels if needed.
+      Please try your best to understand how this score is calculated using classification principles.
+      Only output a single digit from {1, 2, 3, 4, 5, 6} for each classification.

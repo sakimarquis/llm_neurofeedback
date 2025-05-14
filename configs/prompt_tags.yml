@@ -1,0 +1,47 @@
+"mistralai/Mistral-7B-Instruct-v0.1":
+  user: "[INST]"
+  assistant: "[/INST]"
+  bos: "<s>"
+  eos: "</s>"
+
+"Mistral-7B-Instruct-v0.1":
+  user: "[INST]"
+  assistant: "[/INST]"
+  bos: "<s>"
+  eos: "</s>"
+
+"mistral-7b-instruct":
+  user: "[INST]"
+  assistant: "[/INST]"
+  bos: "<s>"
+  eos: "</s>"
+
+"mistral":
+  start: "[INST]"
+  end: "\n[/INST]"
+  user: "[INST]"
+  assistant: "[/INST]"
+  bos: "<s>"
+  eos: "</s>"
+
+"llama":
+  start: "<|begin_of_text|><|start_header_id|>system<|end_header_id|>"
+  end: "<|eot_id|>"
+  user: "<|start_header_id|>user<|end_header_id|>"
+  assistant: "<|start_header_id|>assistant<|end_header_id|>"
+  bos: "<|begin_of_sentence|>"
+  eos: "<|end_of_sentence|>"
+
+"gemma":
+  user: "<start_of_turn>user\n"
+  assistant: "<end_of_turn>\n<start_of_turn>model\n"
+  bos: "<bos>"
+  eos: "<eos>"
+
+"qwen":
+  start: "<|im_start|>"
+  end: "<|im_end|>\n"
+  user: "<|im_start|>user\n"
+  assistant: "<|im_end|>\n<|im_start|>assistant\n"
+  bos: ""
+  eos: ""

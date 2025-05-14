@@ -1,0 +1,10 @@
+model_name: "google/gemma-3-1b-it"  # "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "meta-llama/Meta-Llama-3-8B-Instruct"
+use_transformer_lens: false
+padding_side: "left"
+process_hidden_method: "last_assistant_to_eos_mean"  # "last_assistant_to_eos_each", "last"
+clf: "pcascore"  # "pca", "lr"
+clf_name: "pc3"
+pc_number: 3
+normalize: true
+batch_size: 8
+n_test_examples: 10
