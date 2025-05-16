@@ -106,7 +106,7 @@ def generate_example_scores(dataset, model, tokenizer, tags, cfg, save_dir, file
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="prepare scores")
     parser.add_argument("--model", type=str, default="llama3.1_8b")
-    parser.add_argument("--dataset", type=str, default="true_false")  # commonsense, true_false
+    parser.add_argument("--dataset", type=str, default="commonsense")
     # python main_prep.py --model llama3.1_8b --dataset commonsense
     args = parser.parse_args()
     cfg = load_exp_cfg(args.model)

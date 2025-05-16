@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--imit_exp_end", type=int, default=100, help="Ending experiment number (exclusive)")
     parser.add_argument("--model", type=str, default="llama3.1_8b", help="Configuration file: the model that generates the scores")
     parser.add_argument("--layer", type=int, default=0, help="Layer to use for imitation")
-    parser.add_argument("--dataset", type=str, default="commonsense")  # commonsense, true_false
+    parser.add_argument("--dataset", type=str, default="commonsense")
     parser.add_argument("--clf", type=str, default="default")  # default classifier in loaded cfg
     parser.add_argument("--pc", type=int, default=1)
     parser.add_argument("--n_train", type=int, default=-1, help="Number of training examples to use. -1 means all.")
