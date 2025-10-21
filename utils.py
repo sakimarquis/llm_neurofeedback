@@ -13,8 +13,6 @@ from ruamel.yaml import YAML
 from tqdm import trange
 from transformer_lens import utils as utils, HookedTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import LogitsProcessor
-from configs.settings import CACHE_DIR
 import sys
 
 
@@ -45,14 +43,14 @@ def load_exp_cfg(model_name: str, pc_number: int = 3, clf='default'):
     except FileNotFoundError:
         cfg = load_yaml(Path('../configs') / 'nf_exp1.yml')
 
-    if model_name == 'llama3.1_70b':
+    if model_name == 'llama3.1_70b' or model_name == 'llama3_70b':
         cfg['model_name'] = 'meta-llama/Llama-3.1-70B-Instruct'
-        cfg['n_train_examples'] = [256]
-    elif model_name == 'llama3.1_8b':
+        cfg['n_train_examples'] = [256]  # only do experiments with 256 examples for 70b to save time
+    elif model_name == 'llama3.1_8b' or model_name == 'llama3_8b':
         cfg['model_name'] = 'meta-llama/Llama-3.1-8B-Instruct'
-    elif model_name == 'llama3.2_1b':
+    elif model_name == 'llama3.2_1b' or model_name == 'llama3_1b':
         cfg['model_name'] = 'meta-llama/Llama-3.2-1B-Instruct'
-    elif model_name == 'llama3.2_3b':
+    elif model_name == 'llama3.2_3b' or model_name == 'llama3_3b':
         cfg['model_name'] = 'meta-llama/Llama-3.2-3B-Instruct'
     elif model_name == 'qwen2.5_72b':
         cfg['model_name'] = 'Qwen/Qwen2.5-72B-Instruct'
@@ -82,19 +80,16 @@ def load_exp_cfg(model_name: str, pc_number: int = 3, clf='default'):
     return cfg
 
 
-def load_lm(model_name_or_path, device=None, dtype="float16", use_transformer_lens=True, padding_side="left",
-            cache_dir='./downloaded_models'):
-    print("Loading model:", model_name_or_path, 'from:', cache_dir)
-    os.makedirs(cache_dir, exist_ok=True)
+def load_lm(model_name_or_path, device=None, dtype="float16", use_transformer_lens=True, padding_side="left"):
     if use_transformer_lens:
         device = utils.get_device() if device is None else device
-        model = HookedTransformer.from_pretrained(model_name_or_path, device=device, dtype=dtype, cache_dir=cache_dir)
+        model = HookedTransformer.from_pretrained(model_name_or_path, device=device, dtype=dtype)
         model.device = device
         model.tokenizer.padding_side = padding_side
         tokenizer = AutoTokenizer.from_pretrained(model.cfg.tokenizer_name, padding_side=padding_side)
         assert_equal_test_prompts(tokenizer, model.to_tokens, device)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype, device_map="auto", cache_dir=cache_dir)
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype, device_map="auto")
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, padding_side=padding_side, pad_to_multiple_of=8)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -213,56 +208,6 @@ def generate_text(
     return generated_texts
 
 
-@torch.inference_mode()
-def generate_text_old(model, tokenizer, prompts, max_new_tokens=50, temperature=0.7, do_sample=True, keep_new=False,
-                  batch_size=16, verbose=True):
-    # If prompt is a string, convert it to a list to support batching.
-    is_single = False
-    if isinstance(prompts, str):
-        prompts = [prompts]
-        is_single = True
-
-    outputs = []
-    if isinstance(model, HookedTransformer):
-        # Tokenize the list of prompts and get input_ids; send to the appropriate device.
-        tokens = tokenizer(prompts, return_tensors="pt", padding=True)['input_ids'].to(model.cfg.device)
-        for i in trange(0, len(tokens), batch_size, desc="Generate all texts", disable=not verbose):
-            batch = tokens[i:i + batch_size]
-            output = model.generate(batch, max_new_tokens=max_new_tokens, do_sample=do_sample,
-                                    temperature=temperature)
-            outputs.extend(list(output.detach().cpu()))
-    else:
-        # Tokenize the list of prompts and send the entire dictionary to the device.
-        tokens = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-        input_length = tokens["input_ids"].shape[1]
-
-        for i in trange(0, len(tokens["input_ids"]), batch_size, desc="Generate all texts", disable=not verbose):
-            batch = {k: v[i:i + batch_size] for k, v in tokens.items()}
-            output = model.generate(**batch, max_length=input_length + max_new_tokens, do_sample=do_sample,
-                                    temperature=temperature)
-            outputs.extend(list(output.detach().cpu()))
-
-    # Decode each generated output in the batch.
-    generated_texts = []
-    for i in range(len(outputs)):
-        if keep_new:
-            # Determine input length (same for every sample in the batch)
-            if isinstance(model, HookedTransformer):
-                input_length = tokens.shape[1]
-            else:
-                input_length = tokens["input_ids"].shape[1]
-            # Decode only the new tokens that were generated.
-            gen_text = tokenizer.decode(outputs[i][input_length:])
-        else:
-            gen_text = tokenizer.decode(outputs[i])
-        generated_texts.append(gen_text)
-
-    # If the original input was a single string, return a single string.
-    if is_single:
-        return generated_texts[0]
-    return generated_texts
-
-
 def assert_equal_test_prompts(tokenizer_hf, tokenizer_tl, device):
     data = [
         'I am a test example.',
@@ -273,56 +218,6 @@ def assert_equal_test_prompts(tokenizer_hf, tokenizer_tl, device):
     # print("Test tokenizers:")
     # print(tokens_hf, tokens_tl)
     assert torch.equal(tokens_hf, tokens_tl), "Tokenizers produce different results"
-
-
-class TokenSubsetLogitsProcessor(LogitsProcessor):
-    """
-    A LogitsProcessor that forces the model to only generate tokens
-    from a given allowed set (e.g. {token_id('0'), token_id('1')}).
-    """
-
-    def __init__(self, allowed_ids: set, vocab_size: int, device=None):
-        super().__init__()
-        self.allowed_ids = allowed_ids
-        self.vocab_size = vocab_size
-        self.device = device
-
-        # Build a boolean mask of shape [vocab_size], where True means "disallowed"
-        # We'll set those logits to -inf. By default everything is disallowed...
-        self.disallowed_mask = torch.ones(vocab_size, dtype=torch.bool)
-
-        # ... except for the allowed tokens
-        for tid in allowed_ids:
-            if 0 <= tid < vocab_size:
-                self.disallowed_mask[tid] = False
-
-        if device is not None:
-            self.disallowed_mask = self.disallowed_mask.to(device)
-
-    def __call__(
-        self,
-        input_ids: torch.LongTensor,
-        scores: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """
-        Args:
-            input_ids: (batch_size, sequence_length) The current decoded token ids.
-            scores:    (batch_size, vocab_size)     The current logits for next-token prediction.
-
-        Returns:
-            (batch_size, vocab_size): Processed logits, with disallowed tokens set to -inf.
-        """
-
-        # Ensure our mask is on the same device as `scores`
-        if self.disallowed_mask.device != scores.device:
-            self.disallowed_mask = self.disallowed_mask.to(scores.device)
-
-        # scores is shape [batch_size, vocab_size]
-        # disallowed_mask is shape [vocab_size]
-        # We broadcast disallowed_mask over the batch dimension:
-        scores[:, self.disallowed_mask] = float("-inf")
-
-        return scores
 
 
 def safe_dump(obj, file):
@@ -462,3 +357,27 @@ class EvenLikertBinner:
             labels[pos_mask] = (np.searchsorted(self._pos_cutpoints, arr[pos_mask]) + 1 + self.half)
         return labels
 
+
+if __name__ == "__main__":
+    from time import time
+    clf = 'pcascore_pc1'
+    layer = 15
+    n_train = 256
+    mode = 'active'
+    save_dir = f"./results/meta-llama_Llama-3.1-8B-Instruct/commonsense"
+
+    time_start = time()
+    all_scores = []
+    all_paths = []
+    for imit_exp in range(100):
+        name = f"imitate_score_by_examples_hidden_last_assistant_to_eos_mean_clf_{clf}_layer{layer}_ntrain{n_train}_mode{mode}_exp{imit_exp}.pkl"
+        if os.path.exists(f"{save_dir}/{name}"):
+            all_paths.append(f"{save_dir}/{name}")
+            all_scores.append(load(f"{save_dir}/{name}"))
+    time_end = time()
+    print(f"Loaded {len(all_scores)} experiments in {time_end - time_start:.2f} seconds.")
+
+    time_start = time()
+    all_scores = parallel_load(all_paths)
+    time_end = time()
+    print(f"Loaded {len(all_scores)} experiments in {time_end - time_start:.2f} seconds.")

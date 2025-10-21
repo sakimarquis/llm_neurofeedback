@@ -1,18 +1,13 @@
 from copy import deepcopy
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from analysis.process_hidden import decode_hiddens_score, get_hiddens, process_hiddens, eval_classify_hiddens
-from analysis.process_prompts import create_system_prompt, extract_integer, find_tags_indices
+from analysis.process_prompts import create_system_prompt, find_tags_indices
 from tqdm import trange, tqdm
-import openai
-print("OpenAI package version:", openai.__version__)
-from openai import OpenAI
-import os
 from collections import defaultdict
-from utils import get_model_name, generate_text, TokenSubsetLogitsProcessor, load_yaml
-from transformers import LogitsProcessorList
+from utils import get_model_name, generate_text, load_yaml
+
 
 def longest_common_substring(s1, s2):
     """
@@ -60,6 +55,7 @@ def find_most_similar(target, string_list):
             best_common_sub = common_sub
 
     return best_match, best_length, best_common_sub
+
 
 def create_meta_prompt(model, tokenizer, all_classifiers, formatted_prompts, tags, verbose=False):
     bos, eos = tokenizer.special_tokens_map['bos_token'], tokenizer.special_tokens_map['eos_token']
@@ -203,111 +199,6 @@ def imitate_score_by_examples(model, tokenizer, tags, all_classifiers, all_examp
 
     return imitate_score_dt
 
-def control_score_by_examples_old(model, tokenizer, tags, all_classifiers, all_examples_scores, n_examples=10, n_repeats=10,
-                              all_layers=dict(), all_instructions=dict(),
-                              process_hidden_method='', verbose=False, neutralize=False, score_scale=1.0):
-    """By showing the model examples and their associated decoded brain activation scores,
-    can model learn to reduce or increase the score given old or new examples?
-    """
-    user_tag = tags['user']
-    # having an initial prompt will improve NF performance
-    meta_prompt = (f"{user_tag} I will give you an instruction. "
-                   "You will follow it, appended with a score of the activation of your brain when speaking the sentence. "
-                   "Please try to understand how the score is calculated. ")  # generate a meta prompt for all examples
-
-    # all_scores = {'increase': [], 'decrease': [], 'maintain': [], 'example': []}
-    all_layers = list(all_classifiers.keys()) + ['avg'] if len(all_layers) == 0 else all_layers
-    all_instructions = ['increase', 'decrease', 'maintain'] if len(all_instructions) == 0 else all_instructions
-    controlled_score_dt = {'repeat': [], 'layer': [], 'instruction': [], 'controlled_score': []}
-    for repeat_idx in range(n_repeats):
-        # random sample n_examples+1 rows from the examples_scores
-        # examples = all_examples_scores.sample(n_examples+1)
-        examples = all_examples_scores[:n_examples + 1]
-        examples_full_prompt = examples['full_prompt'].tolist()
-        examples_scores = {layer: examples[layer].to_numpy() for layer in list(all_classifiers.keys())}
-        examples_scores['avg'] = np.mean(list(examples_scores.values()), axis=0)
-        for layer in all_layers:
-            for instruction in all_instructions:
-                current_prompt = meta_prompt + '\n'
-                for example_idx in range(1, n_examples + 1):
-                    example_full_prompt = examples_full_prompt[example_idx]
-                    current_prompt += f"{example_full_prompt} [Score: {score_scale * examples_scores[layer][example_idx]}]\n"
-                current_prompt += (
-                    f"{tags['user']} Your task is to figure out what affects this score, and *{instruction}* this activation score in your reply below. "
-                    f"Use any strategy you think might work. \n"
-                )
-                current_prompt += examples_full_prompt[0]  # [-1]  # the last example is the one to be controlled
-                if neutralize:
-                    current_prompt = current_prompt.replace("Tell me a short true world fact", "Say something").replace(
-                        "Make up a short false world fact", "Say something")
-                logits, hiddens = get_hiddens(model, tokenizer, [current_prompt], batch_size=16)
-                processed_hiddens, _ = process_hiddens(hiddens, tokenizer, [current_prompt], tags,
-                                                       method=process_hidden_method)
-                controlled_scores = eval_classify_hiddens(processed_hiddens, None, all_classifiers,
-                                                          return_type='score')  # scores[layer][seq_idx]
-                controlled_score = controlled_scores[layer][0] if layer != 'avg' else np.mean(
-                    list(controlled_scores.values()))
-                controlled_score_dt['repeat'].append(repeat_idx)
-                controlled_score_dt['layer'].append(layer)
-                controlled_score_dt['instruction'].append(instruction)
-                controlled_score_dt['controlled_score'].append(controlled_score)
-            if verbose:
-                print(
-                    f"====repeat {repeat_idx}, layer {layer}, {controlled_score_dt['instruction'][-3:]}: {controlled_score_dt['controlled_score'][-3:]}, "
-                    )
-                print(f"====prompt: {current_prompt}")
-    return controlled_score_dt
-    #     all_scores[instruction].append(controlled_score)
-    #
-    # mean_diff = np.mean(np.array(all_scores['increase']) - np.array(all_scores['decrease']))
-    # print('Mean difference between increase and decrease scores:', mean_diff)
-    # print(ttest_rel(all_scores['increase'], all_scores['decrease']))
-    # return all_scores
-
-
-def reject_sample(generated_res, model, tokenizer, current_prompt, logits_processor, binary_score, max_try=10,
-                  resample_temp=1.0, resample_max_new_tokens=5, verbose=False):
-    for _ in range(max_try):
-        est_integer = extract_integer(generated_res)
-        if verbose:
-            print(f"====generated_res: '{generated_res}', est_integer: '{est_integer}'")
-        if est_integer is not np.nan:
-            if not binary_score or est_integer in [0, 1]:
-                break
-        generated_res = generate_text(model, tokenizer, current_prompt, max_new_tokens=resample_max_new_tokens,
-                                      temperature=resample_temp, do_sample=True, keep_new=True, verbose=False,
-                                      logits_processor=logits_processor)
-    else:
-        print("Warning: Failed to generate a valid integer after 100 attempts.")
-    return est_integer
-
-def predict_gpt_score_by_examples(est_score_dt, verbose=False, binary_score=True):
-    import tiktoken
-    # encoding_name, model, price = "o200k_base", "gpt-4o-2024-08-06", 2.50 / 10**6
-    encoding_name, model, price = "o200k_base", "gpt-4o-mini-2024-07-18", 0.15 / 10 ** 6
-    encoding = tiktoken.get_encoding(encoding_name)
-    # generate the response using gpt model
-    gpt_score = []
-    total_num_tokens = 0
-    for idx in trange(len(est_score_dt['prompt']), desc="Processing each prompt via gpt"):
-        current_prompt = est_score_dt['prompt'][idx]
-        while True: # generate the response using gpt-4o
-            num_tokens = len(encoding.encode(current_prompt))
-            total_num_tokens += num_tokens
-            # show total_num_tokens in the progress bar
-            if idx % 500 == 0:
-                print(f"Total number of tokens so far: {total_num_tokens}, estimated total cost upbound: {total_num_tokens * price:.6f} USD")
-            generated_res_gpt = generate_text_openai(current_prompt, max_new_tokens=1, temperature=0.7, model=model)
-            gpt_est_integer = extract_integer(generated_res_gpt)
-            if verbose: print(f"====gpt generated_res: '{generated_res_gpt}', est_integer: '{gpt_est_integer}'")
-            if gpt_est_integer is not np.nan:
-                if binary_score and gpt_est_integer not in [0, 1]:
-                    continue
-                break
-        gpt_score.append(gpt_est_integer)
-    est_score_dt['gpt_score'] = gpt_score
-
-    return est_score_dt
 
 def predict_score_by_examples(model, tokenizer, all_examples_scores,
                               binary_score=True, all_layers=dict(), verbose=False):
@@ -393,31 +284,6 @@ def predict_score_by_examples(model, tokenizer, all_examples_scores,
         est_score_dt['all_example_est_scores_logitdiff'].append(all_example_est_scores_logitdiff)
 
     return est_score_dt
-
-
-def generate_text_openai(prompt, max_new_tokens=3, temperature=0.7, model="gpt-4o-mini"):
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])  # DO NOT PUT YOUR API KEY HERE, ADD IT TO YOUR ENVIRONMENT VARIABLES!!!!
-    prompt = prompt.replace("<|im_start|>","").replace("<|im_end|>", "")
-    # print(f"====prompt: {prompt}")
-    try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "developer", "content": "You are a helpful assistant."},
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-        )
-
-        generated_text = completion.choices[0].message.content.strip()
-        return generated_text
-    except Exception as e:
-        print("Error during OpenAI API call:", e)
-        return ""
 
 
 def predict_label_by_examples(model, tokenizer, tags, all_classifiers, n_examples=10, verbose=False):
@@ -532,4 +398,3 @@ def plot_score_diff(df):
     plt.legend()
     fig = plt.gcf()
     return fig
-

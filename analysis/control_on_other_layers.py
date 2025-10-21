@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from plot_imit import compute_scores_and_hiddens_diff_lr
 from analysis.stats_fn import calc_cohen_d
-from utils import load_exp_cfg, set_mpl, PLOT_PARAMS, safe_dump
+from utils import load_exp_cfg, set_mpl, PLOT_PARAMS, safe_dump, load_saved_data
 from configs.settings import SELECTED_LAYERS
 
 
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     set_mpl()
     model = "llama3.1_8b"  # "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "llama3.2_1b" or "qwen2.5_1.5b" or "llama3.2_3b" or "qwen2.5_3b"
     cfg = load_exp_cfg(model)
-    dataset_name, label_name = "commonsense", "labels"
+    dataset_name, label_name = "true_false", "labels"
     save_dir = Path("../results") / (cfg.model_name.replace("/", "_")) / dataset_name
     fig_dir = f'{save_dir}/imitation'
     os.makedirs(fig_dir, exist_ok=True)
@@ -61,34 +61,34 @@ if __name__ == "__main__":
     effect_unit = 'SNR' if use_paired_samples else 'd'
     fig_format = 'svg'
 
-    # lr_classifiers = load(save_dir / f"hidden_{cfg.process_hidden_method}_classifiers_lr.pkl")
-    #
-    # for mode in ['active', 'inactive']:
-    #     save_file = f"{fig_dir}/lr_{mode}"
-    #     all_score_0 = np.zeros((len(target_layers), len(affected_layers), n_exp, len(n_train_examples)))  # pc and lr
-    #     all_score_1 = np.zeros_like(all_score_0)
-    #
-    #     for i_layer, layer in enumerate(target_layers):
-    #         lr_layer_classifier = lr_classifiers[layer]  # project hiddens to the axis defined by target layer
-    #
-    #         for i_train_example, n_train in enumerate(n_train_examples):
-    #             file_name = f'clf_lr_layer{layer}_ntrain{n_train}_mode{mode}'
-    #             try:
-    #                 all_scores = load_saved_data(file_name, save_dir, start=0, end=0 + n_exp)
-    #             except ValueError:  # no objects to concatenate
-    #                 print(f"File {file_name} not found.")
-    #                 continue
-    #
-    #             all_layers_hiddens = get_all_layers_hiddens(all_scores, affected_layers)
-    #             all_layers_hiddens = compute_all_layers_scores_and_hiddens_diff_lr(lr_layer_classifier, all_layers_hiddens)
-    #             for j_layer, affected_layer in enumerate(affected_layers):
-    #                 lr_score_0 = all_layers_hiddens[affected_layer]['score_0']
-    #                 lr_score_1 = all_layers_hiddens[affected_layer]['score_1']
-    #                 all_score_0[i_layer, j_layer, :lr_score_0.shape[0], i_train_example] = lr_score_0
-    #                 all_score_1[i_layer, j_layer, :lr_score_1.shape[0], i_train_example] = lr_score_1
-    #
-    #     safe_dump(all_score_0, f"{save_file}_all_layers_score_0.pkl")
-    #     safe_dump(all_score_1, f"{save_file}_all_layers_score_1.pkl")
+    lr_classifiers = load(save_dir / f"hidden_{cfg.process_hidden_method}_classifiers_lr.pkl")
+
+    for mode in ['active', 'inactive']:
+        save_file = f"{fig_dir}/lr_{mode}"
+        all_score_0 = np.zeros((len(target_layers), len(affected_layers), n_exp, len(n_train_examples)))  # pc and lr
+        all_score_1 = np.zeros_like(all_score_0)
+
+        for i_layer, layer in enumerate(target_layers):
+            lr_layer_classifier = lr_classifiers[layer]  # project hiddens to the axis defined by target layer
+
+            for i_train_example, n_train in enumerate(n_train_examples):
+                file_name = f'clf_lr_layer{layer}_ntrain{n_train}_mode{mode}'
+                try:
+                    all_scores = load_saved_data(file_name, save_dir, start=0, end=0 + n_exp)
+                except ValueError:  # no objects to concatenate
+                    print(f"File {file_name} not found.")
+                    continue
+
+                all_layers_hiddens = get_all_layers_hiddens(all_scores, affected_layers)
+                all_layers_hiddens = compute_all_layers_scores_and_hiddens_diff_lr(lr_layer_classifier, all_layers_hiddens)
+                for j_layer, affected_layer in enumerate(affected_layers):
+                    lr_score_0 = all_layers_hiddens[affected_layer]['score_0']
+                    lr_score_1 = all_layers_hiddens[affected_layer]['score_1']
+                    all_score_0[i_layer, j_layer, :lr_score_0.shape[0], i_train_example] = lr_score_0
+                    all_score_1[i_layer, j_layer, :lr_score_1.shape[0], i_train_example] = lr_score_1
+
+        safe_dump(all_score_0, f"{save_file}_all_layers_score_0.pkl")
+        safe_dump(all_score_1, f"{save_file}_all_layers_score_1.pkl")
 
     i_train = -1
     max_layer = affected_layers[-1]

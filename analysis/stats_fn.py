@@ -1,7 +1,5 @@
 from typing import Tuple
-
 import numpy as np
-from scipy.stats import norm
 
 
 def compute_snr(data: np.ndarray, axis: int | Tuple[int, ...]) -> Tuple[np.ndarray, np.ndarray]:
@@ -89,25 +87,3 @@ def mean_ci(data: np.ndarray, axis: int | Tuple[int, ...]) -> Tuple[np.ndarray, 
     std_err = np.std(data, axis=axis) / np.sqrt(n)
     ci = 1.96 * std_err  # For a 95% confidence interval
     return mean, ci
-
-
-def calc_one_sample_cohen_d(x: np.ndarray, mu0: float = 0.0, alpha: float = 0.05):
-    """Compute one-sample Cohen's d = (mean - mu0) / sd, its standard error,
-    and a (1-alpha) confidence interval using normal approximation.
-
-    :param x: 1D array of sample data
-    :param mu0: population mean under null hypothesis
-    :param alpha: significance level for CI
-    """
-    n = len(x)
-    if n < 2:
-        raise ValueError("Need at least 2 observations for an unbiased SD.")
-
-    mean_x = np.mean(x)
-    std_x  = np.std(x, ddof=1)
-    d = (mean_x - mu0) / (std_x + 1e-10)
-    var_d = (1.0 / n) + (d ** 2) / (2.0 * n)
-    se_d = np.sqrt(var_d)
-    z = norm.ppf(1 - alpha / 2)
-    ci = z * se_d
-    return d, ci

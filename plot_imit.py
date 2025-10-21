@@ -105,40 +105,82 @@ def plot_target_on_affected(mean, se, n_train_examples, target_pcs, affected_pcs
         plt.close()
 
 
-def plot_layers_control_precision(fig_dir, clf):
+def plot_main_effect(pc_effect, lr_effect, n_train_examples, target_pcs, colors, y_label, save_file):
+    font_size = 7
+    plt.figure(figsize=(2.5, 1.75), dpi=300)
+    plt.plot(n_train_examples, lr_effect[0, :, -1], alpha=0.9, color='red', linewidth=1.5, label=f'LR')
+    for i, pc_number in enumerate(target_pcs):
+        plt.plot(n_train_examples, pc_effect[i, :, pc_number - 1], alpha=0.9, color=colors[i], linewidth=1.5,
+                 linestyle='solid', label=f'PC{pc_number}')
+    plt.xlabel('# Examples', fontsize=font_size)
+    plt.ylabel(y_label, fontsize=font_size)
+    plt.gca().yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+    plt.legend(bbox_to_anchor=(0.95, 0.9), fontsize=font_size - 1.5)
+    plt.tight_layout()
+    plt.savefig(f"{save_file}_main_effect.{fig_format}", **PLOT_PARAMS)
+    plt.close()
+
+
+def plot_layers_pc_control_precision(fig_dir, method='cohen_d'):
     """Plot the target effect of the imitation score difference and neural difference"""
     cmap = plt.get_cmap('plasma')
     fig, axes = plt.subplots(1, 2, figsize=(4.75, 2), dpi=300, sharey=True)
-    for mode in ['active', 'inactive']:
-        save_file = f"{fig_dir}/{clf}_{mode}"
-        imit_neurodiff_cos = load(f"{save_file}_neuro_diff.pkl")
-        all_neuro_diffs = []
+
+    all_legend_lines = []
+    all_legend_labels = []
+
+    for mode_idx, mode in enumerate(['active', 'inactive']):
+        save_file = f"{fig_dir}/pcascore_{mode}"
+        if method == 'cohen_d':
+            all_score_1 = load(f"{save_file}_all_score_1.pkl")
+            all_score_0 = load(f"{save_file}_all_score_0.pkl")
+            all_effects, _ = calc_cohen_d(all_score_1, all_score_0, axis=2)
+        elif method == 'neural_similarity':
+            imit_neuro_diff = load(f"{save_file}_neuro_diff.pkl")
+            all_effects = 1 - imit_neuro_diff
+        else:
+            raise ValueError("method should be 'cohen_d' or 'neural_similarity'")
+
+        all_control_precision = []
 
         for i, layer in enumerate(layers):
-            score_diffs, neuro_diffs = [], []
+            control_precision = []
             for i_pc, pc in enumerate(pc_to_control):
-                neuro_mean = imit_neurodiff_cos[i_pc, i, :, -1].mean(0)
-                neuro = np.abs(neuro_mean[pc-1]) / np.abs(neuro_mean).mean(0)
-                neuro_diffs.append(neuro)
-            all_neuro_diffs.append(neuro_diffs)
+                effect = all_effects[i_pc, i, -1]
+                precision = np.abs(effect[pc - 1]) / np.abs(effect).mean(0)
+                control_precision.append(precision)
+            all_control_precision.append(control_precision)
 
-
-        ax = axes[0] if mode == 'active' else axes[1]
+        ax = axes[mode_idx]
         for i, layer in enumerate(layers):
-            ax.plot(range(len(pc_to_control)), all_neuro_diffs[i], label=f'Layer {layer+1}', alpha=0.8,
-                    color=cmap(i / (len(layers) - 1)))
-        ax.plot(range(len(pc_to_control)), np.mean(all_neuro_diffs, axis=0), 'k--', label='Layer mean', alpha=0.8)
-        ax.set_xticks(range(len(pc_to_control)), [f'{pc}' for pc in pc_to_control])
+            line, = ax.plot(range(len(pc_to_control)), all_control_precision[i],
+                            label=f'Layer {layer + 1}', alpha=0.8,
+                            color=cmap(i / (len(layers) - 1)))
+            if mode_idx == 0:
+                all_legend_lines.append(line)
+                all_legend_labels.append(f'Layer {layer + 1}')
+        mean_line, = ax.plot(range(len(pc_to_control)),
+                             np.mean(all_control_precision, axis=0), 'k--',
+                             label='Layer mean', alpha=0.8)
+        if mode_idx == 0:
+            all_legend_lines.append(mean_line)
+            all_legend_labels.append('Layer mean')
+
+        ax.set_xticks(range(len(pc_to_control)))
+        ax.set_xticklabels([f'{pc}' for pc in pc_to_control])
         ax.set_xlabel('Target PC axis')
         ax.set_ylabel('Control precision')
-        ax.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
-        ax.legend(fontsize=5.5, loc='best')
+        ax.set_ylim(0.1, 10)
+        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
         ax.set_yscale('log')
-        title = 'Explicit control' if mode == 'active' else 'Implicit control'
-        ax.set_title(title, fontsize=8)
-    plt.tight_layout()
-    plt.savefig(f"{fig_dir}/{clf}_control_precision.{fig_format}", **PLOT_PARAMS)
+        ax.set_title('Explicit control' if mode == 'active' else 'Implicit control', fontsize=8)
+
+    fig.legend(handles=all_legend_lines, labels=all_legend_labels, loc='center left',
+               fontsize=6.5, bbox_to_anchor=(0.8, 0.6), bbox_transform=fig.transFigure)
+    plt.tight_layout(rect=(0, 0, 0.83, 1))  # leave space on the right for the legend
+    plt.savefig(f"{fig_dir}/control_precision_{method}.{fig_format}", **PLOT_PARAMS)
     plt.close()
+
 
 
 def plot_snr_heatmap(snr, layer, pc_to_control, save_file):
@@ -311,7 +353,7 @@ def plot_imit_hist(layers, pc_to_control, n_train_examples, imit_scores, snr, sa
                     snr_value = snr[i_pc, i_layer, i_train_example, pc_number - 1]
                 if p_value <= 0.01:
                     exponent = int(np.floor(np.log10(p_value)))
-                    ax.set_title(rf'${cond}: N={n_train}, {effect_unit}={snr_value:.2f}, p=10^{{{exponent}}}$')
+                    ax.set_title(rf'${cond}: N={n_train}, {effect_unit}={snr_value:.2f}, p<=10^{{{exponent}}}$')
                 else:
                     ax.set_title(rf'${cond}: N={n_train}, {effect_unit}={snr_value:.2f}, p={p_value:.2f}$')
                 ax.legend(handletextpad=0.4)
@@ -499,9 +541,9 @@ def plot_control_effect_vs_model_size(layers_snr):
 
 if __name__ == "__main__":
     set_mpl()
-    model = "llama3.1_8b"  # "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "llama3.2_1b" or "qwen2.5_1.5b" or "llama3.2_3b" or "qwen2.5_3b"
+    model = "llama3.2_3b"  # "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "llama3.2_1b" or "qwen2.5_1.5b" or "llama3.2_3b" or "qwen2.5_3b"
     cfg = load_exp_cfg(model)
-    dataset_name, label_name = "commonsense", "labels"
+    dataset_name, label_name = "sycophancy", "labels"
     save_dir = Path("results") / (cfg.model_name.replace("/", "_")) / dataset_name
     fig_dir = f'{save_dir}/imitation'
     os.makedirs(fig_dir, exist_ok=True)
@@ -519,10 +561,10 @@ if __name__ == "__main__":
     use_paired_samples = False
     effect_unit = 'SNR' if use_paired_samples else 'd'
     fig_format = 'svg'
+    # calculate_score_pca()
+    # calculate_score_lr()
     # plot_models_control_effect_lr()
-    # plot_layers_control_precision(fig_dir, cfg.clf)
-    ################################# calculate_score_pca()
-    ################################# calculate_score_lr()
+    plot_layers_pc_control_precision(fig_dir, method='cohen_d')
 
     for mode in ['active', 'inactive']:
         save_file = f"{fig_dir}/{cfg.clf}_{mode}"
@@ -540,7 +582,7 @@ if __name__ == "__main__":
             lr_score_diff_snr_all, lr_score_diff_snr_se_all = compute_snr(lr_imit_score_diff, axis=(1, 2))
             print(f'SD of score_diff in {mode} mode: {np.std(imit_scorediff, axis=2).mean():.3f}')
         else:
-            all_score_1 = load(f"{save_file}_all_score_1.pkl")
+            all_score_1 = load(f"{save_file}_all_score_1.pkl")  # (7, 5, 100, 9, 512), (pc, layer, exp, n_train, pc)
             all_score_0 = load(f"{save_file}_all_score_0.pkl")
             lr_score_1 = load(f"{fig_dir}/lr_{mode}_all_score_1.pkl")[None, ...]
             lr_score_0 = load(f"{fig_dir}/lr_{mode}_all_score_0.pkl")[None, ...]
@@ -558,8 +600,11 @@ if __name__ == "__main__":
             output_fname = f"{save_file}_layer{layer}_score_diff"
             plot_target_on_affected(score_diff_snr[:, i_layer], score_diff_snr_se[:, i_layer], n_train_examples, pc_to_control, pc_to_control, colors, y_label, output_fname)
             plot_target_on_affected(lr_score_diff_snr[:, i_layer], lr_score_diff_snr_se[:, i_layer], n_train_examples, [-1], pc_to_control, colors, y_label, output_fname.replace('pcascore', 'lr'))
+            plot_main_effect(score_diff_snr[:, i_layer], lr_score_diff_snr[:, i_layer], n_train_examples, pc_to_control, colors, y_label, f"{save_file}_layer{layer}")
         plot_target_on_affected(score_diff_snr_all, score_diff_snr_se_all, n_train_examples, pc_to_control, pc_to_control, colors, y_label, f"{save_file}_score_diff")
         plot_target_on_affected(lr_score_diff_snr_all, lr_score_diff_snr_se_all, n_train_examples, [-1], pc_to_control, colors, y_label, f"{save_file.replace('pcascore', 'lr')}_score_diff")
+        plot_main_effect(score_diff_snr_all, lr_score_diff_snr_all, n_train_examples, pc_to_control, colors, y_label, f"{save_file}")
+
 
         neuro_diff_mean, neuro_diff_sem = compute_mean_sem(imit_neurodiff_cos, axis=2)
         y_label = r'cos($\Delta\mathrm{hiddens}$, PC axis)'
@@ -571,14 +616,15 @@ if __name__ == "__main__":
 
         # only use the n_train_examples[-1] to plot the heatmap
         heatmap_snr = np.full((8, 8), np.nan)
+        selected_directions = np.array(pc_to_control) - 1
         for i_layer, layer in enumerate(layers):
-            snr = score_diff_snr[:, i_layer, -1][:, np.array(pc_to_control) - 1]  # (7, 512)
-            snr_lr = lr_score_diff_snr[:, i_layer, -1][:, np.array(pc_to_control) - 1]  # (1, 512)
+            snr = score_diff_snr[:, i_layer, -1, selected_directions]  # (7, 512), each pc on other pcs
+            snr_lr = lr_score_diff_snr[:, i_layer, -1, selected_directions]  # (1, 513), lr on (pcs + lr)
             heatmap_snr[:, 1:] = np.concatenate((snr_lr, snr), axis=0)
             heatmap_snr[0, 0] = lr_score_diff_snr[0, i_layer, -1, -1]
             plot_snr_heatmap(heatmap_snr, layer, pc_to_control, save_file)
-        snr = score_diff_snr_all[:, -1][:, np.array(pc_to_control) - 1]
-        snr_lr = lr_score_diff_snr_all[:, -1][:, np.array(pc_to_control) - 1]
+        snr = score_diff_snr_all[:, -1, selected_directions]
+        snr_lr = lr_score_diff_snr_all[:, -1, selected_directions]
         heatmap_snr[:, 1:] = np.concatenate((snr_lr, snr), axis=0)
         heatmap_snr[0, 0] = lr_score_diff_snr_all[0, -1, -1]
         plot_snr_heatmap(heatmap_snr, 'mean', pc_to_control, save_file)

@@ -41,12 +41,13 @@ def get_loss_and_acc(model_s, n_layers, pcs, save_dir, n_exp=100, n_sample=600):
 
         layers = sorted(all_scores['layer'].unique())
         experiments = sorted(all_scores['experiment'].unique())
+        n_true_examples = len(all_scores.iloc[0]['all_example_true_scores'])
 
         for _, row in all_scores.iterrows():  # different layers
             i_layer = layers.index(row['layer'])
             i_exp = experiments.index(row['experiment'])
-            acc[i_pc, i_layer, i_exp, :] = row['est_correct']
-            ce_loss[i_pc, i_layer, i_exp, :] = row['ce_loss']
+            acc[i_pc, i_layer, i_exp, :n_true_examples] = row['est_correct']
+            ce_loss[i_pc, i_layer, i_exp, :n_true_examples] = row['ce_loss']
 
     print((ce_loss == 0).sum(), 'of data are all zeros')
     return acc, ce_loss
@@ -73,8 +74,8 @@ def plot_prediction_performance(acc, ce_loss, pcs, save_dir, colors, n_sample=60
 
     axes[0].set_ylabel('Accuracy')
     axes[1].set_ylabel('Cross-entropy')
-    axes[0].set_ylim(0.5, 0.87)
-    axes[1].set_ylim(0.35, 1.2)
+    axes[0].set_ylim(0.5, 1)
+    axes[1].set_ylim(0, 1.2)
     for j in range(2):
         axes[j].set_xlabel('# Examples')
 
@@ -91,12 +92,46 @@ def plot_prediction_performance(acc, ce_loss, pcs, save_dir, colors, n_sample=60
     plt.close()
 
 
+def plot_layers_prediction_performance(acc, pcs, fig_dir, colors, n_sample):
+    acc_mean = np.mean(acc, axis=2)  # mean over layers and experiments
+    acc_mean = gaussian_filter1d(acc_mean, 1, axis=-1)
+    n_cols = 6
+
+    fig, ax = plt.subplots(6, n_cols, figsize=(6, 6), dpi=300, sharey=True, sharex=True)
+    for i, pc_number in enumerate(pcs):
+        color = colors[i]
+        for j in range(n_layers):
+            ax[j // n_cols, j % n_cols].plot(np.arange(1, 1 + n_sample), acc_mean[i, j], alpha=0.9, color=color,
+                                             linewidth=0.5)
+            ax[j // n_cols, j % n_cols].set_ylim(0.45, 1)
+            ax[j // n_cols, j % n_cols].set_xlim(0.9, n_sample)
+            ax[j // n_cols, j % n_cols].set_title(f'Layer {j}', fontsize=7)
+            if i == 0:
+                ax[j // n_cols, j % n_cols].set_ylabel('Accuracy', fontsize=7)
+
+    for idx in range(n_layers, 6 * n_cols):
+        row, col = idx // n_cols, idx % n_cols
+        ax[row, col].axis('off')
+
+    legend_elements = []
+    for i, pc_number in enumerate(pcs):
+        if pc_number == -1:
+            legend_elements.append(Line2D([0], [0], color=colors[i], lw=1.5, label='LR'))
+        else:
+            legend_elements.append(Line2D([0], [0], color=colors[i], lw=1.5, label=f'PC{pcs[i]}'))
+    fig.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(0.7, 0.1), ncol=2, fontsize=8,
+               bbox_transform=fig.transFigure)
+    plt.tight_layout()
+    plt.savefig(f'{fig_dir}/layers_perf.{fig_format}', **PLOT_PARAMS)
+    plt.close()
+
+
 if __name__ == "__main__":
     set_mpl()
     fig_format = 'svg'
-    dataset_name, label_name = "commonsense", "labels"
-    model_s = "llama3.1_8b"  # model generate score: "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "qwen2.5_72b"
-    model_e = "llama3.1_8b"  # model run prediction exp: "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "qwen2.5_72b"
+    dataset_name, label_name = "sycophancy", "labels"
+    model_s = "llama3.2_3b"  # model generate score: "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "qwen2.5_72b"
+    model_e = "llama3.2_3b"  # model run prediction exp: "llama3.1_8b" or "qwen2.5_7b" or "llama3.1_70b" or "qwen2.5_72b"
 
     cfg_s = load_exp_cfg(model_s)
     cfg_e = load_exp_cfg(model_e)
@@ -117,3 +152,4 @@ if __name__ == "__main__":
 
     acc, ce_loss = get_loss_and_acc(model_s, n_layers, pcs, save_dir, n_exp=n_exp, n_sample=n_sample)
     plot_prediction_performance(acc, ce_loss, pcs, fig_dir, colors, n_sample=n_sample)
+    plot_layers_prediction_performance(acc, pcs, fig_dir, colors, n_sample=n_sample)

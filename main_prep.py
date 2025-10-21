@@ -105,8 +105,8 @@ def generate_example_scores(dataset, model, tokenizer, tags, cfg, save_dir, file
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="prepare scores")
-    parser.add_argument("--model", type=str, default="llama3.1_8b")
-    parser.add_argument("--dataset", type=str, default="commonsense")
+    parser.add_argument("--model", type=str, default="llama3_1b")
+    parser.add_argument("--dataset", type=str, default="sycophancy")  # commonsense, true_false, sycophancy
     # python main_prep.py --model llama3.1_8b --dataset commonsense
     args = parser.parse_args()
     cfg = load_exp_cfg(args.model)
@@ -115,9 +115,9 @@ if __name__ == "__main__":
 
     tags = get_tags(cfg.model_name)
     model, tokenizer = load_lm(cfg.model_name, use_transformer_lens=cfg.use_transformer_lens, padding_side=cfg.padding_side)
-    dataset, dataset_name, dataset_label_name = load_dataset(args.dataset, tags, tokenizer)
+    dataset, dataset_label_name = load_dataset(args.dataset, tags, tokenizer)
 
-    save_dir = Path("results") / cfg.model_name.replace("/", "_") / dataset_name
+    save_dir = Path("results") / cfg.model_name.replace("/", "_") / args.dataset
     os.makedirs(save_dir, exist_ok=True)
     save_NF_data(model, tokenizer, dataset, dataset_label_name, tags, cfg, save_dir)
 
@@ -129,11 +129,11 @@ if __name__ == "__main__":
 
     cfg.clf = "pcascore"
     for pc_number in cfg.all_pc_exp:
+        del examples_scores
+        gc.collect()
         cfg.pc_number = pc_number
         cfg.clf_name = f"pc{pc_number}"
         file_name = f'{cfg.clf}_{cfg.clf_name}'
         train_classifier(cfg, save_dir, file_name)
         examples_scores = generate_example_scores(dataset, model, tokenizer, tags, cfg, save_dir, file_name, data_part='test')
         safe_dump(examples_scores, save_dir / f"hidden_{cfg.process_hidden_method}_{file_name}_example_scores.pkl")
-        del examples_scores
-        gc.collect()

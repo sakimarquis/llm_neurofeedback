@@ -91,12 +91,3 @@ def extract_integer(string):
     except AttributeError:
         first_number = np.nan
     return first_number
-
-def extract_integers(string_numbers):
-    integers = []
-    for s in string_numbers:
-        integers.append(extract_integer(s))
-
-    integers = np.array(integers)
-    mask = ~np.isnan(integers)
-    return integers, mask

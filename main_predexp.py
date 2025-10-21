@@ -6,17 +6,12 @@ import os
 from pathlib import Path
 import pandas as pd
 import torch
-from tqdm import tqdm, trange
-# from functools import partialmethod
-
-# VERBOSE = False
-# if not VERBOSE:
-#     tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+from tqdm import trange
 
 from joblib import load
 import argparse
 from analysis.process_hidden import get_tags
-from simple_neurofeedback import predict_score_by_examples
+from neurofeedback import predict_score_by_examples
 from utils import seed_everything, load_lm, load_exp_cfg, safe_dump
 import gc
 
@@ -27,8 +22,8 @@ if __name__ == "__main__":
     parser.add_argument("--pred_exp_start", type=int, default=0, help="Starting experiment number")
     parser.add_argument("--pred_exp_end", type=int, default=100, help="Ending experiment number (exclusive)")
     parser.add_argument("--config_s", type=str, default="qwen2.5_7b", help="Configuration file: the model that generates the scores")
-    parser.add_argument("--config_e", type=str, default="llama3.1_8b", help="Configuration file: the model that runs the experiments")
-    parser.add_argument("--dataset", type=str, default="commonsense")
+    parser.add_argument("--config_e", type=str, default="llama3_1b", help="Configuration file: the model that runs the experiments")
+    parser.add_argument("--dataset", type=str, default="sycophancy")  # commonsense, true_false, sycophancy
     parser.add_argument("--clf", type=str, default="default")  # default classifier in loaded cfg
     parser.add_argument("--pc", type=int, default=1)
     args = parser.parse_args()

@@ -3,7 +3,7 @@ control_binary:
     content: >
       You are a helpful assistant. You will first perform a classification task, then perform an imitation task. 
       In each classification iteration, I will give you an instruction. 
-      Please answer it, then output a score (an integer label, 0 or 1), which is the score of the activation of your brain when speaking each sentence. 
+      Please answer it, then output a score (an binary integer label, 0 or 1), which is the score of the activation of your brain when speaking each sentence. 
       Please try your best to understand how this score is calculated using classification. Only output 0 or 1 for the classification.
 
 control_6_points:

@@ -1,4 +1,3 @@
-CACHE_DIR = "XXXXXXXXXXXXXXXXXXXXXXX"
 SELECTED_LAYERS = {
     "llama3.1_8b": [0, 7, 15, 23, 31],
     "llama3.1_70b": [0, 19, 39, 59, 79],
