@@ -18,7 +18,6 @@ Official code repository for [Language Models Are Capable of Metacognitive Monit
 - `plot_imit.py`, `plot_pred.py` - Convenience scripts for visual summaries of cached experiments.
 - `utils.py` - Shared helpers for seeding, model loading, configuration aliases, and serialization.
 - `submit.slurm`, `submit_imit.slurm`, `submit_pred.slurm` - Slurm templates for batch execution (preparation, imitation control, and prediction).
-- `tasks/` - Slot for task-specific scripts or notebooks (populate as needed).
 - `results/` - Auto-created output directory (`results/<model>/<dataset>/`) containing `.pkl` caches and figures.
 
 ## Environment Setup
@@ -26,15 +25,13 @@ Official code repository for [Language Models Are Capable of Metacognitive Monit
 uv venv
 uv pip install -r requirements.txt
 ```
-You can also skip activation and prefix commands with `uv run`, e.g., `uv run python main_prep.py …`.
-
 ## Configuring Experiments
 - Align dataset, prompt, and classifier settings in `configs/nf_exp1.yml`, `configs/meta_prompts.yml`, and `configs/prompt_tags.yml` before running.
 - Adjust layer subsets in `configs/settings.py::SELECTED_LAYERS`.
 - Supported dataset keys: `commonsense`, `true_false`, `sycophancy`, `emotion`.
 - The paper reports results using PC axes `[1, 2, 4, 8, 32, 128, 512]` and an LR classifier (`--clf lr`) for comparison; replicate runs should include these settings.
 - Model aliases like `llama3_8b` are expanded in `utils.py` (e.g., to `meta-llama/Meta-Llama-3.1-8B-Instruct`); full Hugging Face names are also accepted.
-- Generated artifacts (hidden-state caches, classifier pickles, plots) land in `results/<model>/<dataset>/`. Avoid committing these artifacts.
+- Generated artifacts (hidden-state caches, classifier pickles, plots) land in `results/<model>/<dataset>/`. 
 
 ## Running Locally (Python)
 Activate your environment and run the three stages:
@@ -52,24 +49,16 @@ python main_imitexp.py --model llama3_8b --dataset commonsense --clf lr --imit_e
 python main_predexp.py --config_s llama3_8b --config_e qwen2.5_7b --dataset commonsense --pred_exp_end -1
 ```
 
-Use `--*_end -1` to process the full dataset; omit or change the value for quick smoke tests. Inspect the corresponding directory in `results/` to verify `.pkl` caches and `.png/.pdf` plots.
-
 ## Running on Slurm
 1. Review `submit.slurm`, `submit_imit.slurm`, and `submit_pred.slurm` before submission:
    - Update `#SBATCH` directives (`--account`, `-q/--partition`, `--gres`, `--mem-per-gpu`, `--time`, log output path).
    - Ensure `module load` and `conda activate` lines match your cluster environment; point to the environment created above.
    - Create the log directory referenced by `#SBATCH -o` (e.g., `mkdir -p temp`) or change it.
    - Uncomment or swap the `python main_*.py` invocation if you adapt a template for another stage.
+   
 2. Submit jobs with the same flags used locally. Examples:
    ```bash
    sbatch submit.slurm --model llama3_8b --dataset commonsense
    sbatch submit_imit.slurm --model llama3_8b --dataset commonsense --pc 1
    sbatch submit_pred.slurm --config_s llama3_8b --config_e qwen2.5_7b --dataset commonsense --pc 1
    ```
-3. Monitor logs under the path supplied to `#SBATCH -o` and confirm `results/<model>/<dataset>/` fills with the expected artifacts.
-
-## Outputs and Next Steps
-- Hidden-state arrays, classifier checkpoints, and score tables are stored as `.pkl` files; plots are saved as `.png`/`.pdf`.
-- Use `plot_imit.py` and `plot_pred.py` to regenerate figures from cached runs.
-- For new datasets, add a README under `data/custom/<dataset_name>/` documenting provenance and preprocessing.
-- Validate code changes by running the smallest representative experiment (`--*_end -1`) and reviewing updated artifacts in `results/`.
