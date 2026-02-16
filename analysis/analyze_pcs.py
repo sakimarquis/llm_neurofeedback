@@ -9,7 +9,8 @@ from scipy.spatial.distance import cosine
 from analysis.process_hidden import eval_classify_hiddens
 from pathlib import Path
 from analysis.stats_fn import mean_ci
-from utils import set_mpl, PLOT_PARAMS, safe_dump, load_exp_cfg
+from utils import safe_dump, load_exp_cfg
+from plotter import set_mpl, PLOT_PARAMS
 
 
 def explained_variance_on_direction(X: np.ndarray, w: np.ndarray):
@@ -77,16 +78,16 @@ def plot_layers_pc_lr_classifier_performance(data_dict, lr_clf, pca_clf, pcs, sa
     for i, pc_number in enumerate(pcs):
         for k in pca_clf.keys():
             pca_clf[k].pc_number = pc_number
-        all_train_accuracies = eval_classify_hiddens(train_X, train_y, pca_clf, return_type='accuracy')
-        all_test_accuracies = eval_classify_hiddens(test_X, test_y, pca_clf, return_type='accuracy')
+        all_train_accuracies = eval_classify_hiddens(train_X, pca_clf, return_type='accuracy', labels=train_y)
+        all_test_accuracies = eval_classify_hiddens(test_X, pca_clf, return_type='accuracy', labels=test_y)
         ax[i // n_cols, i % n_cols].plot(list(all_train_accuracies.keys()), list(all_train_accuracies.values()), label="Train")
         ax[i // n_cols, i % n_cols].plot(list(all_test_accuracies.keys()), list(all_test_accuracies.values()), label="Test")
         ax[i // n_cols, i % n_cols].axhline(y=0.5, color='grey', linestyle='--')  # chance level
         ax[i // n_cols, i % n_cols].set_xlabel("Layer")
         ax[i // n_cols, i % n_cols].set_title(f"PC{pc_number}")
 
-    all_train_accuracies = eval_classify_hiddens(train_X, train_y, lr_clf, return_type='accuracy')
-    all_test_accuracies = eval_classify_hiddens(test_X, test_y, lr_clf, return_type='accuracy')
+    all_train_accuracies = eval_classify_hiddens(train_X, lr_clf, return_type='accuracy', labels=train_y)
+    all_test_accuracies = eval_classify_hiddens(test_X, lr_clf, return_type='accuracy', labels=test_y)
     ax[-1, -1].plot(list(all_train_accuracies.keys()), list(all_train_accuracies.values()), label="Train")
     ax[-1, -1].plot(list(all_test_accuracies.keys()), list(all_test_accuracies.values()), label="Test")
     ax[-1, -1].axhline(y=0.5, color='grey', linestyle='--')  # chance level

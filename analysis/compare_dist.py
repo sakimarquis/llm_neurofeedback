@@ -1,7 +1,8 @@
 import os
 import joblib
 import matplotlib.pyplot as plt
-from utils import set_mpl, PLOT_PARAMS, load_exp_cfg
+from utils import load_exp_cfg
+from plotter import set_mpl, PLOT_PARAMS
 from configs.settings import SELECTED_LAYERS
 from tqdm import tqdm
 

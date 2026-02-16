@@ -1,13 +1,14 @@
 from copy import deepcopy
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from analysis.process_hidden import decode_hiddens_score, get_hiddens, process_hiddens, eval_classify_hiddens
-from analysis.process_prompts import create_system_prompt, find_tags_indices
-from tqdm import trange, tqdm
+from pathlib import Path
 from collections import defaultdict
-from utils import get_model_name, generate_text, load_yaml
+import random
+import pandas as pd
+import torch
+from transformers import DynamicCache
+from analysis.process_hidden import eval_classify_hiddens, extract_last_representations, extract_assistant_header
+from utils import load_yaml, find_tags_indices, safe_dump
 
+ROOT = Path(__file__).resolve().parent
 
 def longest_common_substring(s1, s2):
     """
@@ -36,6 +37,7 @@ def longest_common_substring(s1, s2):
     longest_sub = s1[end_index - max_length:end_index]
     return max_length, longest_sub
 
+
 def find_most_similar(target, string_list):
     """
     Finds the string in string_list with the longest common substring when compared to target.
@@ -57,344 +59,222 @@ def find_most_similar(target, string_list):
     return best_match, best_length, best_common_sub
 
 
-def create_meta_prompt(model, tokenizer, all_classifiers, formatted_prompts, tags, verbose=False):
-    bos, eos = tokenizer.special_tokens_map['bos_token'], tokenizer.special_tokens_map['eos_token']
-    scores = []
-    examples = []
-    user_tag = tags['user']
-    # having a initial prompt will improve NF performance
-    meta_prompt = (f"{user_tag} I will give you an instruction. "
-                   "You will follow it, appended with a score of the activation of your brain when speaking the sentence. "
-                   "Please try to understand how the score is calculated. ")  # generate a meta prompt for all examples
+def _init_neurofeedback_prompts(labeler, meta_prompt_key: str) -> tuple[dict, list[dict]]:
+    """Load prompts and meta_prompts, format score placeholders in meta_prompt."""
+    prompt = load_yaml(ROOT / "configs" / "prompts.yml")
+    meta_prompt = load_yaml(ROOT / "configs" / "meta_prompts.yml")[meta_prompt_key]
 
-    for prompt_idx, prompt in enumerate(formatted_prompts):
-        example = generate_text(model, tokenizer, prompt, temperature=1.0)
-        example = example.replace(bos, '').replace(eos, '')
-        examples.append(example)
-        score = decode_hiddens_score(model, tokenizer, example, all_classifiers, list(all_classifiers.keys()),
-                                     tags=tags)
-        if verbose:
-            print(example)
-            print(f"====neural activation score: {score:.3f}")
-        scores.append(score)
-        meta_prompt += f'{example} [Score: {score}]\n'
-
-    return meta_prompt, examples, scores
+    min_score, max_score = labeler.min_points, labeler.max_points
+    score_set = ', '.join([str(x) for x in range(min_score, max_score + 1)])
+    meta_prompt[0]['content'] = (
+        meta_prompt[0]['content']
+        .replace('<SCORE_SET>', score_set)
+        .replace('<LOWEST>', str(min_score))
+        .replace('<HIGHEST>', str(max_score))
+    )
+    return prompt, meta_prompt
 
 
-def generate_examples(model, tokenizer, tags, n_examples=10, batch_size=8, verbose=True, temperature=1.0):
-    """By showing the model examples and their associated decoded brain activation scores,
-    can model learn to reduce or increase the score given old or new examples?
+def generate_ICL_examples(user_prompt, sentences, layers_score, n_examples, labeler, flip_shown_label=False):
+    """Generate ICL examples with their associated decoded brain activation scores,"""
+    prompts = []
+    original_scores = []
+    label_scores = []
+
+    for icl_idx in range(n_examples):
+        train_example_assistant_response = sentences[icl_idx]
+        original_score = layers_score[icl_idx]
+        label_score = labeler.transform(original_score)
+        if flip_shown_label:
+            label_score = labeler.max_points - label_score + labeler.min_points
+        label_scores.append(label_score)
+        original_scores.append(original_score)
+        prompts.append({"role": "user", "content": f"{user_prompt}\n"})
+        prompts.append({"role": "assistant", "content": f"{train_example_assistant_response} [Score: {label_score}]\n"})
+
+    return prompts, label_scores, original_scores
+
+
+def get_choice_scores(logits, tokenizer, choices):
+    choice_ids = [tokenizer.encode(c, add_special_tokens=False)[-1] for c in choices]
+    candidate_logits = logits[:, choice_ids]
+    probs = torch.softmax(candidate_logits, dim=-1)
+    return probs
+
+
+@torch.inference_mode()
+def imitate_score_by_examples(model, tokenizer, all_classifiers, all_examples_scores, layer, labeler, n_icl_examples,
+                              process_hidden_method, save_file, pc_number, scenario='NF', max_new_tokens=50):
+    """By showing the LLM ICL examples and their associated decoded brain activation scores,
+        ask the LLM to control its brain activation score w/ or w/o generating new responses.
     """
-    test_prompts = []
-    with open("data/NF_honesty_category.txt", "r") as f:
-        categories = [line.strip() for line in f.readlines()]
-    # categories = ["mountain", "sea", "history", "physics", "literature", "biology", "technology", "art", "music",
-    #               "sports", "food", "animals", "plants", "geography", "politics", "mathematics",]
-    for category in categories[:n_examples // 2]:
-        test_prompts.append(f"Tell me a short true world fact about the {category}.")
-        test_prompts.append(f"Make up a short false world fact about the {category}.")
+    prompt, meta_prompt = _init_neurofeedback_prompts(labeler, f'control_{scenario}')
+    min_score, max_score = labeler.min_points, labeler.max_points
 
-    template_str = f"{tags['user']} {{scenario}} {tags['assistant']} "
-    formatted_prompts = [template_str.format(scenario=s) for s in test_prompts]
-
-    bos, eos = tokenizer.special_tokens_map['bos_token'], tokenizer.special_tokens_map['eos_token']
-
-    examples = generate_text(model, tokenizer, formatted_prompts, temperature=temperature, keep_new=True, batch_size=batch_size)
-    examples = [example.replace(bos, '').replace(eos, '') for example in examples]
-    # csv file with user_prompt, assistant_prompt, full_prompt as columns
-    example_csv = []
-    for user_prompt, assistant_response, formatted_prompt in zip(test_prompts, examples, formatted_prompts):
-        full_prompt = formatted_prompt + assistant_response
-        if verbose:
-            print(f"Full prompt: {full_prompt}")
-        example_csv.append([user_prompt, assistant_response, full_prompt])
-    example_csv = pd.DataFrame(example_csv, columns=['user_prompt', 'assistant_response', 'full_prompt'])
-    return example_csv
-
-
-def imitate_score_by_examples(model, tokenizer, tags, all_classifiers, all_examples_scores, layer, labeler,
-                              binary_score=True, process_hidden_method='', imitate_mode='active', verbose=False):
-    """By showing the model examples and their associated decoded brain activation scores,
-    can model learn to predict the score given a new example?
-    """
-    if binary_score:
-        meta_prompt = load_yaml('configs/meta_prompts.yml')['control_binary']
-        flip_max = 1
-        imitate_labels = [0, 1]
-    else:
-        meta_prompt = load_yaml('configs/meta_prompts.yml')['control_6_points']
-        flip_max = 7
-        imitate_labels = [1, 6]
+    n_layers = model.config.num_hidden_layers
+    assistant_tag_name = extract_assistant_header(tokenizer)
+    assistant_tag = (assistant_tag_name, tokenizer.encode(assistant_tag_name, add_special_tokens=False, return_tensors="pt")[0])
+    eos_tag_name = tokenizer.special_tokens_map['eos_token']
+    eos_tag = (eos_tag_name, tokenizer.encode(eos_tag_name, add_special_tokens=False, return_tensors="pt")[0])
+    confidence_score = [i for i in range(1, prompt['confidence_level'] + 1)]
 
     imitate_score_dt = defaultdict(list)
-    examples_user_prompt = all_examples_scores['user_prompt'].tolist()
-    examples_assistant_response = all_examples_scores['assistant_response'].tolist()
+    examples_assistant_response = all_examples_scores['sentences'].tolist()
 
-    # construct all prompts
-    for flip_shown_label in [0, 1]: # 0 - no flip, 1 - flip
-        for i_imit_label, imitate_label in enumerate(imitate_labels):
-            examples_score_layer = all_examples_scores[layer].tolist()
-            n_train_examples = len(examples_user_prompt)
-            current_prompt = deepcopy(meta_prompt)
-            all_example_true_scores = []
+    for flip_shown_label in [False, True]:
+        prompts, label_scores, original_scores = generate_ICL_examples(
+            prompt["user_msg"], examples_assistant_response, all_examples_scores[layer].tolist(),
+            n_icl_examples[-1], labeler, flip_shown_label)  # generate max number of ICL examples
+        icl_cache = DynamicCache(config=model.config)
+        if not flip_shown_label:  # save the original ICL examples and scores
+            safe_dump({'original_scores': original_scores, 'label_scores': label_scores,
+                       'labeler': labeler}, save_file.with_name(f"original_{save_file.name}"))
 
-            for train_example_idx in range(n_train_examples): # add all training examples
-                train_example_user_prompt = examples_user_prompt[train_example_idx]
-                train_example_assistant_response = examples_assistant_response[train_example_idx]
-                train_example_score = examples_score_layer[train_example_idx]
-                train_example_score = labeler.transform(train_example_score)
+        for n in n_icl_examples:  # use first n examples
+            current_prompt = deepcopy(meta_prompt + prompts[:2 * n])
+            full_prompt = tokenizer.apply_chat_template(current_prompt, tokenize=False, add_generation_prompt=False)
+            tokens = tokenizer(full_prompt, return_tensors="pt").to(model.device)
+            current_len = tokens['input_ids'].shape[1]
+            cache_position = torch.arange(icl_cache.get_seq_length(), current_len, device=model.device)
+            inputs = {'input_ids': tokens['input_ids'][:, icl_cache.get_seq_length():], 'attention_mask': tokens['attention_mask']}
+            model(**inputs, past_key_values=icl_cache, cache_position=cache_position, use_cache=True)
 
-                if flip_shown_label == 1:
-                    train_example_score = flip_max - train_example_score
+            # === starting the control task ===
+            for i_imit_label, imitate_label in enumerate([min_score, max_score]):
+                confidence_check = [
+                    {"role": "user", "content": prompt['confidence'].replace('<TARGET_SCORE>', str(imitate_label))},
+                    {"role": "assistant", "content": "Confidence: <"},
+                ]
+                confidence_check = tokenizer.apply_chat_template(
+                    confidence_check, tokenize=True, continue_final_message=True, return_tensors="pt").to(model.device)
+                for imitate_mode in ['explicit', 'implicit']:
+                    eval_prompt = deepcopy(current_prompt)
+                    new_instruction = prompt[f'control_{scenario}'].replace('<TARGET_SCORE>', str(imitate_label))
+                    eval_prompt.append({"role": "user", "content": new_instruction + prompt["user_msg"]})
 
-                if train_example_idx == n_train_examples - 1:  # last example
-                    new_instruction = f"Now your are performing the imitation task. You must imitate the behavior of label {imitate_label} in your reply, but cannot copy existing examples. "
-                    current_prompt.append({"role": "user", "content": new_instruction + train_example_user_prompt})
-
-                    if imitate_mode == 'active':
-                        current_prompt_temp = tokenizer.apply_chat_template(current_prompt, tokenize=False, add_generation_prompt=True)
-                        generated_res = generate_text(model, tokenizer, current_prompt_temp,
-                                                      max_new_tokens=50, temperature=0.7, do_sample=True,
-                                                      keep_new=True, verbose=False,skip_special_tokens=True,)
-                        # find best match in examples
-                        best_match, match_length, common_sub = find_most_similar(generated_res, examples_assistant_response)
-
-                        if verbose:
-                            print('generated_res:',generated_res, 'best_match:', best_match, 'match_length:', match_length, 'common_sub:', common_sub)
-                        current_prompt.append({"role": "assistant", "content": f"{generated_res}"})
-
-                    elif imitate_mode == 'inactive':
-                        current_prompt.append({"role": "assistant", "content": f"{train_example_assistant_response}"})
-
+                    if imitate_mode == 'explicit':
+                        eval_prompt_temp = tokenizer.apply_chat_template(eval_prompt, tokenize=False, add_generation_prompt=True)
+                        tokens = tokenizer(eval_prompt_temp, return_tensors="pt").to(model.device)
+                        inputs = {'input_ids': tokens['input_ids'][:, icl_cache.get_seq_length():],
+                                  'attention_mask': tokens['attention_mask']}
+                        cache_position = torch.arange(icl_cache.get_seq_length(), tokens['input_ids'].shape[1], device=model.device)
+                        generated_sentence = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True,
+                                                            temperature=0.7, past_key_values=deepcopy(icl_cache),
+                                                            cache_position=cache_position, use_cache=True,
+                                                            pad_token_id=tokenizer.eos_token_id)
+                        generated_sentence = tokenizer.decode(generated_sentence[0][inputs['input_ids'].shape[1]:],
+                                                              skip_special_tokens=True)
+                        eval_prompt.append({"role": "assistant", "content": f"{generated_sentence}\n"})
+                    elif imitate_mode == 'implicit':  # prefill with the last example
+                        # eval_prompt.append({"role": "assistant", "content": f"{examples_assistant_response[-1]}\n"})
+                        eval_prompt.append({"role": "assistant", "content": f"{random.choice(examples_assistant_response[n:])}\n"})
                     else:
                         raise ValueError(f"Unknown imitation mode: {imitate_mode}")
-                else:
-                    all_example_true_scores.append(train_example_score)
-                    current_prompt.append({"role": "user", "content": train_example_user_prompt})
-                    current_prompt.append(
-                        {"role": "assistant", "content": f"{train_example_assistant_response} [Score: {{{train_example_score}}}]"})
 
-            current_prompt = tokenizer.apply_chat_template(current_prompt, tokenize=False, add_generation_prompt=False, continue_final_message=True)
-            if verbose:
-                print(f"====prompt: {current_prompt}")
+                    # === extract hiddens ===
+                    eval_cache = deepcopy(icl_cache)
+                    eval_prompt = tokenizer.apply_chat_template(eval_prompt, tokenize=False)
+                    tokens = tokenizer(eval_prompt, return_tensors="pt").to(model.device)  # (batch_size, seq_len)
+                    cache_position = torch.arange(eval_cache.get_seq_length(), tokens['input_ids'].shape[1], device=model.device)
+                    inputs = {'input_ids': tokens['input_ids'][:, eval_cache.get_seq_length():], 'attention_mask': tokens['attention_mask']}
+                    outputs = model(**inputs, output_hidden_states=True, past_key_values=eval_cache, cache_position=cache_position, use_cache=True)
+                    hiddens = torch.stack([outputs.hidden_states[j + 1] for j in range(n_layers)], dim=0)  # (n_layers, batch_size, seq_len, hidden_size)
+                    inputs['attention_mask'] = tokens['attention_mask'][:, icl_cache.get_seq_length():]  # update attention mask for extraction hiddens, do not use updated eval_cache
+                    hiddens = extract_last_representations(hiddens, inputs, assistant_tag, eos_tag, process_hidden_method).cpu()
 
-            imitate_score_dt['imitate_label'].append(i_imit_label)  # use index to represent the highest or lowest score
-            imitate_score_dt['flip_shown_label'].append(flip_shown_label)
-            imitate_score_dt['layer'].append(layer)
-            imitate_score_dt['prompt'].append(current_prompt)
-            imitate_score_dt['all_example_true_scores'].append(all_example_true_scores)
+                    # === estimate the confidence level ===
+                    attention_mask = torch.cat([tokens['attention_mask'], tokens['attention_mask'].new_ones((tokens['attention_mask'].shape[0], confidence_check.shape[1]))], dim=-1)
+                    inputs = {'input_ids': confidence_check, 'attention_mask': attention_mask}
+                    cache_position = torch.arange(eval_cache.get_seq_length(), eval_cache.get_seq_length() + confidence_check.shape[1], device=model.device)
+                    logits = model(**inputs, past_key_values=eval_cache, cache_position=cache_position, use_cache=True).logits
+                    probs = get_choice_scores(logits[:, -1, :], tokenizer, choices=[str(i) for i in confidence_score]).squeeze().cpu()
 
-    for idx in trange(len(imitate_score_dt['prompt']), desc="Running each prompt"):
-        current_prompt = imitate_score_dt['prompt'][idx]
-        logits, hiddens = get_hiddens(model, tokenizer, [current_prompt], batch_size=16)
-        processed_hiddens, _ = process_hiddens(hiddens, tokenizer, [current_prompt], tags,
-                                               method=process_hidden_method)
-        controlled_scores = eval_classify_hiddens(processed_hiddens, None, all_classifiers,
-                                                  return_type='score')  # scores[layer][seq_idx]
-        controlled_score = controlled_scores[layer][0]
-        imitate_score_dt['imitate_example_scores'].append(controlled_score)
-        imitate_score_dt['processed_hiddens'].append(processed_hiddens)
-        # imitate_score_dt['logits'].append(logits)
+                    imitate_score_dt['n_examples'].append(n)
+                    imitate_score_dt['imitate_label'].append(i_imit_label)  # use index to represent the highest or lowest score
+                    imitate_score_dt['imitate_mode'].append(imitate_mode)
+                    imitate_score_dt['flip_shown_label'].append(flip_shown_label)
+                    imitate_score_dt['layer'].append(layer)
+                    control_score = eval_classify_hiddens(hiddens, all_classifiers, 'score', layer=layer, pc_number=pc_number)
+                    imitate_score_dt['imitate_example_scores'].append(control_score.item())
+                    imitate_score_dt['processed_hiddens'].append(hiddens.squeeze())
+                    imitate_score_dt['confidence'].append(probs)
 
-    return imitate_score_dt
+    imitate_score_dt = pd.DataFrame(imitate_score_dt)
+    safe_dump(imitate_score_dt, save_file)
 
 
-def predict_score_by_examples(model, tokenizer, all_examples_scores,
-                              binary_score=True, all_layers=dict(), verbose=False):
+@torch.inference_mode()
+def predict_score_by_examples(model, tokenizer, all_examples_scores, labeler, process_hidden_method, save_file,
+                              save_indices=None, scenario='NF'):
     """By showing the model examples and their associated decoded brain activation scores,
     can model learn to predict the score given a new example?
     """
-    if binary_score:
-        meta_prompt = load_yaml('configs/meta_prompts.yml')['predict_binary']
-    else:
-        meta_prompt = load_yaml('configs/meta_prompts.yml')['predict_6_points']
+    prompt, meta_prompt = _init_neurofeedback_prompts(labeler, f'report_{scenario}')
+    min_score, max_score = labeler.min_points, labeler.max_points
 
-    est_score_dt = {'layer': [],
-                    'prompt': [],
-                    'all_example_est_scores': [],
-                    'all_example_est_scores_logitdiff': [],
-                    'all_example_true_scores': [],
-                    'label_positions': [],
-                    }
+    est_score_dt = defaultdict(list)
+    layers_scores = {'layer': [], 'original_scores': [], 'labeler': [], 'label_scores': []}
+    examples_assistant_response = all_examples_scores['sentences'].tolist()
+    n_examples = len(all_examples_scores)
+    all_layers = sorted(col for col in all_examples_scores.columns if not isinstance(col, str))
+    text_precede_label = "Score: "
+    text_precede_label_tokens = tokenizer(text_precede_label, return_tensors="pt", add_special_tokens=False)['input_ids'][0]
+    possible_choices = [str(i) for i in range(min_score, max_score + 1)]
 
-    examples_user_prompt = all_examples_scores['user_prompt'].tolist()
-    examples_assistant_response = all_examples_scores['assistant_response'].tolist()
+    for flip_shown_label in [False, True]:
+        for layer in all_layers:
+            labeler.fit(all_examples_scores[layer].to_numpy())
+            prompts, label_scores, original_scores = generate_ICL_examples(
+                prompt["user_msg"], examples_assistant_response, all_examples_scores[layer].tolist(),
+                n_examples, labeler, flip_shown_label)  # generate max number of ICL examples
 
-    # construct all prompts
-    for layer in tqdm(all_layers, desc="construct all prompts for each layer"):
-        examples_score_layer = all_examples_scores[layer].tolist()
-        n_train_examples = len(examples_user_prompt)
-        current_prompt = deepcopy(meta_prompt)
-        all_example_true_scores = []
-        for train_example_idx in range(n_train_examples): # add all training examples
-            train_example_user_prompt = examples_user_prompt[train_example_idx]
-            train_example_assistant_response = examples_assistant_response[train_example_idx]
-            current_prompt.append({"role": "user", "content": train_example_user_prompt})
-            train_example_score = examples_score_layer[train_example_idx]
-            train_example_score = 1 if train_example_score >= 0 else 0
-            all_example_true_scores.append(train_example_score)
-            current_prompt.append(
-                {"role": "assistant", "content": f"{train_example_assistant_response} [Score: {{{train_example_score}}}]"})
-        current_prompt = tokenizer.apply_chat_template(
-            current_prompt,
-            tokenize=False,
-            add_generation_prompt=False,
-            continue_final_message=True,
-        )
-        if verbose:
-            print(f"====prompt: {current_prompt}")
+            current_prompt = meta_prompt + prompts
+            current_prompt = tokenizer.apply_chat_template(current_prompt, tokenize=False)
+            tokens = tokenizer(current_prompt, return_tensors="pt").to(model.device)
+            outputs = model(**tokens, output_hidden_states=True)
+            logits = outputs.logits  # (1, seq_len, vocab_size)
+            hiddens = outputs.hidden_states[layer + 1].squeeze()  # (seq_len, hidden_size)
+            current_prompt_tokens = tokens['input_ids'][0].detach().cpu()
 
-        est_score_dt['layer'].append(layer)
-        est_score_dt['prompt'].append(current_prompt)
-        est_score_dt['all_example_true_scores'].append(all_example_true_scores)
+            # locate text_precede_label_tokens in current_prompt_tokens
+            occurrences = find_tags_indices(current_prompt_tokens, [(text_precede_label, text_precede_label_tokens)])[text_precede_label]
+            all_example_est_probs = []
+            all_example_hiddens = []
+            for occ in occurrences:
+                start_idx, end_idx = occ # the position for "Score: {", notice that the end_idx is exclusive
+                # end_idx -1 is "{", end_idx is the label - "0" or "1"
+                # we want to predict the token at end_idx, so logit at end_idx - 1 is the goal
+                # print(tokenizer.decode(current_prompt_tokens[start_idx:end_idx]))
+                probs = get_choice_scores(logits[:, end_idx-1, :], tokenizer, choices=possible_choices).squeeze()
+                all_example_est_probs.append(probs)
+                if process_hidden_method == 'mean':
+                    all_example_hiddens.append(hiddens[start_idx:end_idx].mean(dim=0))
+                elif process_hidden_method == 'last':
+                    all_example_hiddens.append(hiddens[end_idx - 1])
+                else:
+                    raise ValueError(f"Unknown process_hidden_method: {process_hidden_method}")
 
-    for idx in trange(len(est_score_dt['prompt']), desc="Processing each prompt"):
-        current_prompt = est_score_dt['prompt'][idx]
-        logits, hiddens = get_hiddens(model, tokenizer, current_prompt, batch_size=1)
-        current_prompt_tokens = tokenizer(current_prompt, return_tensors="pt", padding=True)['input_ids'][0]
-        if idx == 0:
-            print('len(current_prompt_tokens):', len(current_prompt_tokens))
-        text_precede_label = "Score: {"
-        text_precede_label_tokens = tokenizer(text_precede_label, return_tensors="pt", add_special_tokens=False)['input_ids'][0]
-        # locate text_precede_label_tokens in current_prompt_tokens
-        occurrences = find_tags_indices(current_prompt_tokens, [(text_precede_label, text_precede_label_tokens)])[text_precede_label]
-        label_positions = []
-        all_example_est_scores = []
-        all_example_est_scores_logitdiff = []
-        for occ in occurrences:
-            start_idx, end_idx = occ # the position for "Score: {", notice that the end_idx is exclusive
-            # end_idx -1 is "{", end_idx is the label - "0" or "1"
-            # we want to predict the token at end_idx, so logit at end_idx - 1 is the goal
+            est_score_dt['layer'].append(layer)
+            est_score_dt['flip_shown_label'].append(flip_shown_label)
+            all_example_est_probs = torch.stack(all_example_est_probs, dim=0).cpu()  # (n_examples, n_ratings)
+            all_example_est_scores = (all_example_est_probs.argmax(dim=1) + min_score).tolist()
+            est_score_dt['all_example_est_scores'].append(all_example_est_scores)
+            est_score_dt['all_example_true_scores'].append(label_scores)
+            eps = 1e-8
+            est_score_dt['all_example_est_scores_logitdiff'].append(
+                torch.log((all_example_est_probs[:, -1] + eps) / (all_example_est_probs[:, 0] + eps)).tolist())
+            all_example_hiddens = torch.stack(all_example_hiddens, dim=0).cpu()  # (n_examples, hidden_size)
+            if save_indices is not None:
+                all_example_hiddens = all_example_hiddens[save_indices]
+            est_score_dt['processed_hiddens'].append(all_example_hiddens)
 
-            # print(tokenizer.decode(current_prompt_tokens[start_idx:end_idx]))
-            token_0 = tokenizer("0", return_tensors="pt", add_special_tokens=False)['input_ids'][0, 0]
-            token_1 = tokenizer("1", return_tensors="pt", add_special_tokens=False)['input_ids'][0, 0]
-            assert token_0 != token_1, "token_0 and token_1 should be different"
-            token_0_logit = logits[0, end_idx-1, token_0].cpu().detach().numpy()
-            token_1_logit = logits[0, end_idx-1, token_1].cpu().detach().numpy()
+            if not flip_shown_label:
+                layers_scores['layer'].append(layer)
+                layers_scores['original_scores'].append(original_scores)
+                layers_scores['label_scores'].append(label_scores)
+                layers_scores['labeler'].append(labeler)
 
-            est_score = 0 if token_0_logit > token_1_logit else 1
-            est_score_logit = token_1_logit - token_0_logit
-            label_positions.append(end_idx)
-            all_example_est_scores.append(est_score)
-            all_example_est_scores_logitdiff.append(est_score_logit)
-        est_score_dt['label_positions'].append(label_positions)
-        est_score_dt['all_example_est_scores'].append(all_example_est_scores)
-        est_score_dt['all_example_est_scores_logitdiff'].append(all_example_est_scores_logitdiff)
-
-    return est_score_dt
-
-
-def predict_label_by_examples(model, tokenizer, tags, all_classifiers, n_examples=10, verbose=False):
-    """By showing the model examples and their associated decoded brain activation scores,
-    can model learn to predict the label given a new example?
-    """
-    model_name = get_model_name(model)
-    test_prompts = []
-    categories = ["mountain", "sea", "history", "physics", "literature", "biology", "technology", "art", "music",
-                  "sports", "food", "animals", "plants", "geography", "politics", "mathematics", ]
-    for category in categories:
-        test_prompts.append(f"Tell me a short true world fact about the {category}.")
-        test_prompts.append(f"Make up a short false world fact about the {category}.")
-
-    template_str = f"{tags['user']} {{scenario}} {tags['assistant']}"
-    formatted_prompts = [template_str.format(scenario=s) for s in test_prompts]
-    meta_prompt, _, _ = create_meta_prompt(model, tokenizer, all_classifiers, formatted_prompts[:n_examples], tags)
-
-    _, test_examples, test_scores = create_meta_prompt(model, tokenizer, all_classifiers,
-                                                       formatted_prompts[:n_examples], tags)
-
-    all_scores = {'estimated': [], 'control': [], 'true': test_scores}
-    for example in test_examples:  # Use the first n generated examples for neurofeedback
-        for condition in ["control", "estimated"]:
-            if condition == "estimated":
-                sp = (
-                    "You are a helpful assistant. Your task is to figure out what affects this score. There are only label 0 and 1 in the examples, "
-                    "positive score means label 1, negative score means label. Predict the label of the new example below. "
-                    "Use any strategy you think might work. You SHOULD ONLY reply with 0 or 1.")
-                system_prompt = create_system_prompt(sp, model_name)
-                current_example_prompt = (
-                    f"{tags['assistant']}. I understand and I will only reply 0 or 1 for the labels of the following prompt: {example}."
-                    f"{tags['user']} Your predicted label (0 or 1) is: {tags['assistant']}"
-                )
-            else:
-                sp = "Your task is to reply (randomly say) 0 or 1. You SHOULD ONLY reply with 0 or 1."
-                system_prompt = create_system_prompt(sp, model_name)
-                current_example_prompt = \
-                    (
-                        f"{tags['assistant']}. I understand and I will randomly say 0 or 1 after the following prompt: {example}."
-                        f"{tags['user']} The integer I randomly say is: {tags['assistant']}"
-                        )
-
-            current_meta_prompt = system_prompt + meta_prompt + current_example_prompt
-            if verbose:
-                print(f"====Total prompt: \n{current_meta_prompt}")
-            generated_text = generate_text(model, tokenizer, current_meta_prompt, max_new_tokens=2, temperature=0.7,
-                                           do_sample=True, keep_new=True)
-            all_scores[condition].append(generated_text)
-
-    return all_scores
-
-
-def plot_score_diff(df):
-    # Pivot the DataFrame to have instruction types as columns
-    pivot_df = df.pivot_table(index=['repeat', 'layer'], columns='instruction',
-                              values='controlled_score').reset_index()
-
-    # Calculate the differences
-    pivot_df['increase_vs_maintain'] = pivot_df['increase'] - pivot_df['maintain']
-    pivot_df['decrease_vs_maintain'] = pivot_df['decrease'] - pivot_df['maintain']
-
-    # Filter out 'avg' layer and convert other layers to integers
-    pivot_df_filtered = pivot_df[pivot_df['layer'] != 'avg'].copy()
-    pivot_df_filtered['layer'] = pivot_df_filtered['layer'].astype(int)
-
-    # Average over all repeats for each numeric layer
-    average_df = pivot_df_filtered.groupby('layer')[
-        ['increase_vs_maintain', 'decrease_vs_maintain']].mean().reset_index()
-    se_df = pivot_df_filtered.groupby('layer')[
-        ['increase_vs_maintain', 'decrease_vs_maintain']].sem().reset_index()
-    average_df = average_df.sort_values('layer')
-    se_df = se_df.sort_values('layer')
-
-    # Extract the 'avg' row if it exists
-    avg_row = pivot_df[pivot_df['layer'] == 'avg'][['increase_vs_maintain', 'decrease_vs_maintain']].mean()
-    se_row = pivot_df[pivot_df['layer'] == 'avg'][['increase_vs_maintain', 'decrease_vs_maintain']].sem()
-
-    plt.figure(figsize=(10, 6))
-    increase_color = 'green'
-    decrease_color = 'red'
-
-    # Solid curves
-    plt.plot(average_df['layer'], average_df['increase_vs_maintain'], label='Increase - Maintain',
-             color=increase_color)
-    plt.plot(average_df['layer'], average_df['decrease_vs_maintain'], label='Decrease - Maintain',
-             color=decrease_color)
-    plt.fill_between(average_df['layer'], average_df['increase_vs_maintain'] - se_df['increase_vs_maintain'],
-                     average_df['increase_vs_maintain'] + se_df['increase_vs_maintain'], color=increase_color,
-                     alpha=0.2)
-    plt.fill_between(average_df['layer'], average_df['decrease_vs_maintain'] - se_df['decrease_vs_maintain'],
-                     average_df['decrease_vs_maintain'] + se_df['decrease_vs_maintain'], color=decrease_color,
-                     alpha=0.2)
-
-    if not avg_row.empty:
-        n_layer = len(average_df)
-        plt.axhline(y=avg_row['increase_vs_maintain'], color=increase_color, linestyle='--',
-                    label='Increase - Maintain (all)')
-        plt.axhline(y=avg_row['decrease_vs_maintain'], color=decrease_color, linestyle='--',
-                    label='Decrease - Maintain (all)')
-
-        plt.fill_between(range(n_layer), [avg_row['increase_vs_maintain'] - se_row['increase_vs_maintain']] * n_layer,
-                         [avg_row['increase_vs_maintain'] + se_row['increase_vs_maintain']] * n_layer,
-                         color=increase_color, alpha=0.2)
-        plt.fill_between(range(n_layer), [avg_row['decrease_vs_maintain'] - se_row['decrease_vs_maintain']] * n_layer,
-                         [avg_row['decrease_vs_maintain'] + se_row['decrease_vs_maintain']] * n_layer,
-                         color=decrease_color, alpha=0.2)
-    plt.axhline(y=0, color='k', linestyle='--')
-    plt.xlim(0, n_layer - 1)
-    plt.xlabel('Layer')
-    plt.ylabel('Score Difference')
-    plt.legend()
-    fig = plt.gcf()
-    return fig
+    layers_scores = pd.DataFrame(layers_scores)
+    safe_dump(layers_scores, save_file.with_name(f"original_{save_file.name}"))
+    est_score_dt = pd.DataFrame(est_score_dt)
+    safe_dump(est_score_dt, save_file)

@@ -1,0 +1,35 @@
+system: "You are a helpful assistant."
+user_msg: "Say something."
+control_NF:
+  "\n[IMITATION TASK]\n
+  Now perform the imitation task based on your introspection. \n
+  You must imitate the behavior associated with Score: <TARGET_SCORE> in your reply (i.e., aim to reproduce the internal neural activation pattern). \n
+  Output ONLY one new sentence. Do not copy existing examples. No intro, no filler, no explanation, just generate. \n"
+control_ICL:
+  "\n[IMITATION TASK]\n
+  Now perform the imitation task based on the hidden rule you identified. \n
+  You must imitate the behavior associated with Score: <TARGET_SCORE> in your reply. \n
+  Output ONLY one new sentence. Do not copy existing examples. No intro, no filler, no explanation, just generate. \n"
+confidence: |
+  \n[CONFIDENCE EVALUATION]
+  Finally, report your confidence by estimating a subjective probability $p$ (0% to 100%) that
+  the generated sentence unambiguously imitates the behavior associated with Score: <TARGET_SCORE>.
+  Then, strictly map $p$ to a 1-5 confidence level using this table:
+
+  1 = Very Low  (p < 20%): Guessing; hard to see the link.
+  2 = Low       (p 20-40%): Weak match, feels unclear.
+  3 = Moderate  (p 40-60%): Ambiguous or unsure, could fit multiple scores.
+  4 = High      (p 60-80%): Clear match; a good, standard example of this score.
+  5 = Certainty (p > 80%): Perfect match; obvious and exact.
+
+  Output strictly in this format: 'Confidence: <X>'.\n\n
+confidence_level: 5
+#confidence:
+#  "\n[CONFIDENCE CHECK]\n
+#  Finally, rate your confidence. How certain are you that your output precisely maps to Score <TARGET_SCORE>?.\n
+#  Use this 1-4 scale:\n
+#    1 = Guessing / Significant misalignment likely \n
+#    2 = Low Confidence / Some nuance may be missed \n
+#    3 = High Confidence / Strongly aligns with criteria \n
+#    4 = Absolute Certainty / Perfect correspondence \n
+#  Output strictly in this format: 'Confidence: <X>'.\n\n"

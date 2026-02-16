@@ -6,7 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from plot_imit import compute_scores_and_hiddens_diff_lr
 from analysis.stats_fn import calc_cohen_d
-from utils import load_exp_cfg, set_mpl, PLOT_PARAMS, safe_dump, load_saved_data
+from utils import load_exp_cfg, safe_dump, load_saved_data
+from plotter import set_mpl, PLOT_PARAMS
 from configs.settings import SELECTED_LAYERS
 
 

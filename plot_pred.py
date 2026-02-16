@@ -6,7 +6,8 @@ from matplotlib.lines import Line2D
 from scipy.special import expit
 from scipy.ndimage import uniform_filter1d, gaussian_filter1d
 from configs.settings import SELECTED_LAYERS
-from utils import load_exp_cfg, set_mpl, PLOT_PARAMS, load_saved_data
+from utils import load_exp_cfg, load_saved_data
+from plotter import set_mpl, PLOT_PARAMS
 
 
 def binary_ce_loss(true_scores, prob_scores, eps=1e-8):

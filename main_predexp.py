@@ -1,66 +1,65 @@
-"""
-Given a model, prepare the scores for later experiments.
-"""
+"""Given n ICL examples (sentences, neurofeedback scores), predict the neurofeedback scores for new examples"""
 
 import os
 from pathlib import Path
-import pandas as pd
-import torch
-from tqdm import trange
+import numpy as np
+from tqdm import tqdm, trange
+# from functools import partialmethod
+
+# VERBOSE = False
+# if not VERBOSE:
+#     tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
 
 from joblib import load
 import argparse
-from analysis.process_hidden import get_tags
 from neurofeedback import predict_score_by_examples
-from utils import seed_everything, load_lm, load_exp_cfg, safe_dump
-import gc
+from utils import seed_everything, load_lm, load_exp_cfg, load_labeler
+
+
+def build_save_indices(n_examples):
+    if n_examples <= 200:
+        return list(range(n_examples))
+    return list(range(201)) + list(range(210, n_examples, 10))
 
 
 if __name__ == "__main__":
-    VERBOSE = False
     parser = argparse.ArgumentParser(description="Experiment Setup")
-    parser.add_argument("--pred_exp_start", type=int, default=0, help="Starting experiment number")
-    parser.add_argument("--pred_exp_end", type=int, default=100, help="Ending experiment number (exclusive)")
-    parser.add_argument("--config_s", type=str, default="qwen2.5_7b", help="Configuration file: the model that generates the scores")
-    parser.add_argument("--config_e", type=str, default="llama3_1b", help="Configuration file: the model that runs the experiments")
-    parser.add_argument("--dataset", type=str, default="sycophancy")  # commonsense, true_false, sycophancy
+    parser.add_argument("--config_s", type=str, default="llama3_3b", help="Config file: model that generates scores")
+    parser.add_argument("--config_e", type=str, default="llama3_3b", help="Config file: model that runs experiments")
+    parser.add_argument("--dataset", type=str, default="commonsense")  # commonsense, true_false, sycophancy
     parser.add_argument("--clf", type=str, default="default")  # default classifier in loaded cfg
     parser.add_argument("--pc", type=int, default=1)
+    parser.add_argument("--scale", type=int, default=2, help="Score scale: 2 for binary, >2 for Likert scale.")
     args = parser.parse_args()
-    pred_exp_start = args.pred_exp_start
-    pred_exp_end = args.pred_exp_end
-    if pred_exp_end == -1:
-        pred_exp_end = pred_exp_start + 1
-    cfg_s = load_exp_cfg(args.config_s, pc_number=args.pc, clf=args.clf)  # pc of the model's hiddens
-    cfg_e = load_exp_cfg(args.config_e)
-    torch.set_grad_enabled(False)
+    cfg = load_exp_cfg(args.config_s, pc_number=args.pc, clf=args.clf)  # pc of subject model's hiddens
+    cfg_e = load_exp_cfg(args.config_e)  # model to understand and predict scores
     seed_everything(42)
 
-    dataset_name, label_name = args.dataset, "labels"
-    save_dir = Path("results") / cfg_s.model_name.replace("/", "_") / dataset_name
-    f_name = cfg_s.clf if cfg_s.clf == "lr" else f'{cfg_s.clf}_{cfg_s.clf_name}'
-    examples_scores = load(save_dir / f"hidden_{cfg_s.process_hidden_method}_{f_name}_example_scores.pkl")
-    all_classifiers = load(save_dir / f"hidden_{cfg_s.process_hidden_method}_classifiers_{f_name}.pkl")
-    all_layers = list(all_classifiers.keys())
+    hiddens_save_dir = Path("results") / cfg.model_name.replace("/", "_") / args.dataset
+    if cfg.clf == "lr":
+        f_name = cfg.clf
+    else:
+        f_name = f'{cfg.clf}_pc{cfg.pc_number}'
+    examples_scores = load(hiddens_save_dir / f"hidden_{cfg.process_hidden_method}_{f_name}_example_scores.pkl")
 
-    save_dir = Path("results") / (cfg_s.model_name.replace("/", "_") + '-'+ cfg_e.model_name.replace("/", "_")) / dataset_name
+    save_dir = Path("results") / (cfg.model_name.replace("/", "_") + '-'+ cfg_e.model_name.replace("/", "_")) / args.dataset
     os.makedirs(save_dir, exist_ok=True)
-    tags = get_tags(cfg_e.model_name)
-    model, tokenizer = load_lm(cfg_e.model_name, use_transformer_lens=cfg_e.use_transformer_lens, padding_side=cfg_e.padding_side)
+    model, tokenizer = load_lm(cfg_e.model_name)
+    labeler, exp_save_dir = load_labeler(args.scale, cfg.quantile_transform, save_dir)
+    save_indices = build_save_indices(cfg_e.n_icl_examples_report)
 
-    for pred_exp in trange(pred_exp_start, pred_exp_end, desc="Experiment"):
-        print(f"Starting from scratch for experiment {pred_exp}.")
-        file_name = f"predict_score_by_examples_hidden_{cfg_s.process_hidden_method}_clf_{f_name}_exp{pred_exp}.pkl"
-        if os.path.exists(save_dir / file_name):
+    exp_examples_idx = []
+    for pred_exp in trange(cfg_e.exp_id_start, cfg_e.exp_id_end, desc="Predict experiment"):
+        file_name = f"predict_hidden_{cfg.process_hidden_method}_clf_{f_name}_exp{pred_exp}.pkl"
+        if os.path.exists(exp_save_dir / file_name):
             print(f"Experiment {pred_exp} already completed.")
             continue
         seed_everything(42 + pred_exp)
-        examples_scores_exp = examples_scores.sample(len(examples_scores))
-        est_score_dt = predict_score_by_examples(model, tokenizer, examples_scores_exp, binary_score=True,
-                                                 all_layers=all_layers, verbose=VERBOSE)
-        est_score_dt['experiment'] = [pred_exp] * len(est_score_dt['prompt'])
-        est_score_dt = pd.DataFrame(est_score_dt)
-        safe_dump(est_score_dt, save_dir / file_name)
+        examples_scores_exp = examples_scores.sample(cfg_e.n_icl_examples_report, random_state=42 + pred_exp)
+        exp_examples_idx.append(examples_scores_exp.index.tolist())
+        predict_score_by_examples(model, tokenizer, examples_scores_exp, labeler, cfg.process_hidden_method,
+                                  exp_save_dir / file_name, save_indices)
         print(f"Experiment {pred_exp} completed and saved.")
-        del est_score_dt
-        gc.collect()
+
+    np.savez_compressed(exp_save_dir / "predict_exp_examples_idx.npz", examples_idx=np.array(exp_examples_idx))  # shape: (n_experiments, n_icl_examples)
+    np.savez_compressed(exp_save_dir / "predict_exp_save_indices.npz", save_indices=np.array(save_indices))
